@@ -1,0 +1,3 @@
+proxy:
+	go build -o ./build/mev-proxy ./...
+
