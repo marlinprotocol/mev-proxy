@@ -243,7 +243,7 @@ func (p *Proxy) ListenAndServe(addr string) {
 	// spawn whitelist routine
 	atomic.StorePointer(&p.Whitelist, unsafe.Pointer(new([]string)))
 	go func() {
-		ticker := time.NewTicker(6 * time.Second)
+		ticker := time.NewTicker(60 * time.Second)
 		for {
 			keys, err := fetchWhitelist()
 			if err != nil {
