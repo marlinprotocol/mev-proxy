@@ -107,7 +107,7 @@ type WhitelistResp struct {
 func fetchWhitelist() ([]string, error) {
 	graphURL := "https://api.thegraph.com/subgraphs/name/marlinprotocol/mev-bor"
 	reqBytes := []byte(`{"query": "query { keystores { key } }"}`)
-	fmt.Println(string(reqBytes))
+	// fmt.Println(string(reqBytes))
 	r, err := http.Post(graphURL, "application/json", bytes.NewReader(reqBytes))
 
 	if err != nil {
@@ -116,7 +116,7 @@ func fetchWhitelist() ([]string, error) {
 
 	// WARN: Should ideally use Content-Length here but the RPC server does not send it
 	bodyLength := 1000000
-	fmt.Println(r)
+	// fmt.Println(r)
 	if r.Header.Get("content-type") != "application/json" ||
 		bodyLength <= 0 {
 		return nil, fmt.Errorf("Response content type mismatch")
@@ -134,7 +134,7 @@ func fetchWhitelist() ([]string, error) {
 	for idx, keyResp := range resp.Data.Keystores {
 		keys[idx] = keyResp.Key
 	}
-	fmt.Println(keys)
+	// fmt.Println(keys)
 	return keys, nil
 }
 
@@ -170,7 +170,7 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 
 	// Retrieve signature key
 	relaySigStr := r.Header.Get("X-Marlin-Signature")
-	fmt.Println(relaySigStr)
+	// fmt.Println(relaySigStr)
 	relaySigBytes, err := hex.DecodeString(relaySigStr[2:])
 	if err != nil {
 		w.WriteHeader(400)
@@ -201,7 +201,7 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	whitelistPtr := atomic.LoadPointer(&p.Whitelist)
 	whitelist := (*[]string)(whitelistPtr)
 
-	fmt.Println("Whitelist: ", *whitelist)
+	// fmt.Println("Whitelist: ", *whitelist)
 
 	// Verify whitelisted
 	idx := sort.SearchStrings(*whitelist, addr)
@@ -254,7 +254,7 @@ func (p *Proxy) ListenAndServe(addr string) {
 
 			sort.Strings(keys)
 
-			fmt.Println(keys)
+			// fmt.Println(keys)
 
 			// storing pointer to slice here
 			atomic.StorePointer(&p.Whitelist, unsafe.Pointer(&keys))
