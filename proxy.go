@@ -2,19 +2,19 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"github.com/ethereum/go-ethereum/crypto/secp256k1"
+	"golang.org/x/crypto/sha3"
 	"io"
 	"log"
 	"net/http"
-	"strconv"
-	"fmt"
-	"sync/atomic"
-	"github.com/ethereum/go-ethereum/crypto/secp256k1"
-	"golang.org/x/crypto/sha3"
-	"unsafe"
-	"encoding/hex"
 	"sort"
+	"strconv"
+	"sync/atomic"
 	"time"
+	"unsafe"
 )
 
 type Proxy struct {
@@ -204,7 +204,7 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("Whitelist: ", *whitelist)
 
 	// Verify whitelisted
-	idx:= sort.SearchStrings(*whitelist, addr)
+	idx := sort.SearchStrings(*whitelist, addr)
 	if (*whitelist)[idx] != addr {
 		w.WriteHeader(400)
 		return

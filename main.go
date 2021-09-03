@@ -16,4 +16,3 @@ func main() {
 	g := &Proxy{*rpcAddrPtr, nil}
 	g.ListenAndServe(*listenAddrPtr)
 }
-
