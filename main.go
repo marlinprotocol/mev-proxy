@@ -11,7 +11,7 @@ func main() {
 
 	flag.Parse()
 
-	fmt.Println("Starting gateway with listenAddr: {}, rpcAddr: {}", listenAddrPtr, rpcAddrPtr)
+	fmt.Printf("Starting gateway with listenAddr: %s, rpcAddr: %s\n", *listenAddrPtr, *rpcAddrPtr)
 
 	g := &Proxy{*rpcAddrPtr, nil}
 	g.ListenAndServe(*listenAddrPtr)

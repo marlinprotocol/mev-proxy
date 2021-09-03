@@ -1,0 +1,17 @@
+{
+  "name": "mev-proxy",
+  "version": "1.0.0",
+  "description": "",
+  "main": "bundle.js",
+  "dependencies": {
+    "@flashbots/ethers-provider-bundle": "^0.4.1",
+    "ethers": "^5.4.5"
+  },
+  "devDependencies": {},
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "MIT",
+  "type": "module"
+}

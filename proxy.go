@@ -106,7 +106,8 @@ type WhitelistResp struct {
 
 func fetchWhitelist() ([]string, error) {
 	graphURL := "https://api.thegraph.com/subgraphs/name/marlinprotocol/mev-bor"
-	reqBytes, _ := json.Marshal(`{"query": "{ keystores { key } }"`)
+	reqBytes := []byte(`{"query": "query { keystores { key } }"}`)
+	fmt.Println(string(reqBytes))
 	r, err := http.Post(graphURL, "application/json", bytes.NewReader(reqBytes))
 
 	if err != nil {
@@ -115,7 +116,8 @@ func fetchWhitelist() ([]string, error) {
 
 	// WARN: Should ideally use Content-Length here but the RPC server does not send it
 	bodyLength := 1000000
-	if r.Header.Get("Content-Type") != "application/json" ||
+	fmt.Println(r)
+	if r.Header.Get("content-type") != "application/json" ||
 		bodyLength <= 0 {
 		return nil, fmt.Errorf("Response content type mismatch")
 	}
@@ -152,6 +154,7 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 		err != nil ||
 		bodyLength == 0 {
 		w.WriteHeader(400)
+		w.Write([]byte("Invalid content type"))
 		return
 	}
 
@@ -161,17 +164,19 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	err = decoder.Decode(req)
 	if err != nil || req.Jsonrpc != "2.0" {
 		w.WriteHeader(400)
+		w.Write([]byte("Request decode error"))
 		return
 	}
 
 	// Retrieve signature key
 	relaySigStr := r.Header.Get("X-Marlin-Signature")
-	relaySigBytes, err := hex.DecodeString(relaySigStr)
+	fmt.Println(relaySigStr)
+	relaySigBytes, err := hex.DecodeString(relaySigStr[2:])
 	if err != nil {
 		w.WriteHeader(400)
+		w.Write([]byte("Signature decode error"))
 		return
 	}
-
 
 	hasher := sha3.NewLegacyKeccak256()
 	hasher.Write([]byte("\x19Bor Signed MEV TxBundle:\n"))
@@ -181,6 +186,7 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	pubkey, err := secp256k1.RecoverPubkey(msgHash, relaySigBytes)
 	if err != nil {
 		w.WriteHeader(400)
+		w.Write([]byte("Signature recovery error"))
 		return
 	}
 
@@ -189,16 +195,17 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	hasher.Write(pubkey[1:])
 	addrBytes := hasher.Sum(nil)[12:]
 	addr := fmt.Sprintf("0x%x", addrBytes)
-	fmt.Println("Bundle received from %s", addr)
+	fmt.Println("Bundle received from ", addr)
 
 	// Retrieve whitelist
 	whitelistPtr := atomic.LoadPointer(&p.Whitelist)
 	whitelist := (*[]string)(whitelistPtr)
 
-	fmt.Println("Whitelist: %v", *whitelist)
+	fmt.Println("Whitelist: ", *whitelist)
 
 	// Verify whitelisted
-	if sort.SearchStrings(*whitelist, addr) == len(*whitelist) {
+	idx:= sort.SearchStrings(*whitelist, addr)
+	if (*whitelist)[idx] != addr {
 		w.WriteHeader(400)
 		return
 	}
@@ -234,19 +241,25 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 
 func (p *Proxy) ListenAndServe(addr string) {
 	// spawn whitelist routine
+	atomic.StorePointer(&p.Whitelist, unsafe.Pointer(new([]string)))
 	go func() {
 		ticker := time.NewTicker(6 * time.Second)
 		for {
-			<-ticker.C
 			keys, err := fetchWhitelist()
 			if err != nil {
+				fmt.Println("whitelist fetch err", err)
+				<-ticker.C
 				continue
 			}
 
 			sort.Strings(keys)
 
+			fmt.Println(keys)
+
 			// storing pointer to slice here
 			atomic.StorePointer(&p.Whitelist, unsafe.Pointer(&keys))
+
+			<-ticker.C
 		}
 	}()
 
