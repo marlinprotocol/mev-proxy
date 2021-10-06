@@ -22,6 +22,7 @@ type Proxy struct {
 	// We will atomically update this to avoid explicit locks
 	// In modern systems, should avoid _any_ locks
 	Whitelist unsafe.Pointer
+	SubgraphPath string
 }
 
 type RpcReq struct {
@@ -104,8 +105,8 @@ type WhitelistResp struct {
 	} `json:"data"`
 }
 
-func fetchWhitelist() ([]string, error) {
-	graphURL := "https://api.thegraph.com/subgraphs/name/marlinprotocol/mev-bor"
+func (p *Proxy) fetchWhitelist() ([]string, error) {
+	graphURL := "https://api.thegraph.com/subgraphs/name" + p.SubgraphPath
 	reqBytes := []byte(`{"query": "query { keystores { key } }"}`)
 	// fmt.Println(string(reqBytes))
 	r, err := http.Post(graphURL, "application/json", bytes.NewReader(reqBytes))
@@ -245,7 +246,7 @@ func (p *Proxy) ListenAndServe(addr string) {
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		for {
-			keys, err := fetchWhitelist()
+			keys, err := p.fetchWhitelist()
 			if err != nil {
 				fmt.Println("whitelist fetch err", err)
 				<-ticker.C
