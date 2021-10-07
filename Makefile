@@ -1,3 +1,6 @@
 proxy:
 	go build -o ./build/mev-proxy ./...
 
+proxy-arm:
+	GOARCH=arm64 go build -o ./build/arm/mev-proxy ./...
+
