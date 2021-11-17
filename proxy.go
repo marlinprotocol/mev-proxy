@@ -5,8 +5,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"github.com/ethereum/go-ethereum/crypto/secp256k1"
-	"golang.org/x/crypto/sha3"
 	"io"
 	"log"
 	"net/http"
@@ -15,13 +13,16 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+
+	"github.com/ethereum/go-ethereum/crypto/secp256k1"
+	"golang.org/x/crypto/sha3"
 )
 
 type Proxy struct {
 	RpcAddr string
 	// We will atomically update this to avoid explicit locks
 	// In modern systems, should avoid _any_ locks
-	Whitelist unsafe.Pointer
+	Whitelist    unsafe.Pointer
 	SubgraphPath string
 }
 
@@ -140,6 +141,8 @@ func (p *Proxy) fetchWhitelist() ([]string, error) {
 }
 
 func (p *Proxy) handleEthSendBundle(req *RpcReq) *RpcResp {
+	// bundle RPC APIs now moved to the mev namespace
+	req.Method = "mev_sendBundle"
 	return makeRpcCall(req, p.RpcAddr)
 }
 
