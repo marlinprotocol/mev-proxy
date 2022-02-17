@@ -14,7 +14,11 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
+	"github.com/ethereum/go-ethereum/rpc"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -22,8 +26,10 @@ type Proxy struct {
 	RpcAddr string
 	// We will atomically update this to avoid explicit locks
 	// In modern systems, should avoid _any_ locks
-	Whitelist    unsafe.Pointer
-	SubgraphPath string
+	Whitelist         unsafe.Pointer
+	SubgraphPath      string
+	GasLimitPerBundle uint64
+	TxLimitPerBundle  int
 }
 
 type RpcReq struct {
@@ -216,7 +222,13 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 
 	var resp *RpcResp
 	if req.Method == "eth_sendBundle" {
-		resp = p.handleEthSendBundle(req)
+		if goodBundle := p.RunBundleHeuristics(req); goodBundle {
+			resp = p.handleEthSendBundle(req)
+		} else {
+			w.WriteHeader(400)
+			w.Write([]byte("Invalid Bundle. Fails pretests"))
+			return
+		}
 	} else {
 		resp = &RpcResp{
 			"2.0",
@@ -241,6 +253,41 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	w.Write(respBytes)
 
 	return
+}
+
+// SendBundleArgs represents the arguments for a call.
+type SendBundleArgs struct {
+	Txs               []hexutil.Bytes `json:"txs"`
+	BlockNumber       rpc.BlockNumber `json:"blockNumber"`
+	MinTimestamp      *uint64         `json:"minTimestamp"`
+	MaxTimestamp      *uint64         `json:"maxTimestamp"`
+	RevertingTxHashes []common.Hash   `json:"revertingTxHashes"`
+}
+
+func (p *Proxy) RunBundleHeuristics(req *RpcReq) bool {
+	bundleArgs := &SendBundleArgs{}
+	err := json.Unmarshal(req.Params, &bundleArgs)
+	if err != nil {
+		return false
+	}
+
+	if len(bundleArgs.Txs) > int(p.TxLimitPerBundle) {
+		return false
+	}
+
+	var gasLimitsCumulative uint64 = 0
+	for _, encodedTx := range bundleArgs.Txs {
+		tx := new(types.Transaction)
+		if err := tx.UnmarshalBinary(encodedTx); err != nil {
+			return false
+		}
+		gasLimitsCumulative += tx.Gas()
+	}
+	if gasLimitsCumulative > p.GasLimitPerBundle {
+		return false
+	}
+
+	return true
 }
 
 func (p *Proxy) ListenAndServe(addr string) {
