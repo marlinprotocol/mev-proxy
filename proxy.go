@@ -14,11 +14,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
-	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
-	"github.com/ethereum/go-ethereum/rpc"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -26,10 +22,10 @@ type Proxy struct {
 	RpcAddr string
 	// We will atomically update this to avoid explicit locks
 	// In modern systems, should avoid _any_ locks
-	Whitelist         unsafe.Pointer
-	SubgraphPath      string
-	GasLimitPerBundle uint64
-	TxLimitPerBundle  int
+	Whitelist      unsafe.Pointer
+	SubgraphPath   string
+	BundleDispatch chan *RpcReq
+	DelayStep      time.Duration
 }
 
 type RpcReq struct {
@@ -222,12 +218,19 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 
 	var resp *RpcResp
 	if req.Method == "eth_sendBundle" {
-		if goodBundle := p.RunBundleHeuristics(req); goodBundle {
-			resp = p.handleEthSendBundle(req)
-		} else {
+		if len(p.BundleDispatch) == cap(p.BundleDispatch) {
+			// Silent drop
 			w.WriteHeader(400)
-			w.Write([]byte("Invalid Bundle. Fails pretests"))
 			return
+		}
+		p.BundleDispatch <- req
+
+		// Eager return
+		resp = &RpcResp{
+			Jsonrpc: req.Jsonrpc,
+			Result:  "queued for proxy dispatch",
+			Error:   nil,
+			Id:      req.Id,
 		}
 	} else {
 		resp = &RpcResp{
@@ -255,39 +258,23 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-// SendBundleArgs represents the arguments for a call.
-type SendBundleArgs struct {
-	Txs               []hexutil.Bytes `json:"txs"`
-	BlockNumber       rpc.BlockNumber `json:"blockNumber"`
-	MinTimestamp      *uint64         `json:"minTimestamp"`
-	MaxTimestamp      *uint64         `json:"maxTimestamp"`
-	RevertingTxHashes []common.Hash   `json:"revertingTxHashes"`
-}
+// Ensures atleast p.BundleDispatch time separation
+// between two sendBundle requests
+func (p *Proxy) proxyDispatch() {
+	lastDispatch := time.Now()
+	for {
+		req := <-p.BundleDispatch
 
-func (p *Proxy) RunBundleHeuristics(req *RpcReq) bool {
-	bundleArgs := &SendBundleArgs{}
-	err := json.Unmarshal(req.Params, &bundleArgs)
-	if err != nil {
-		return false
-	}
-
-	if len(bundleArgs.Txs) > int(p.TxLimitPerBundle) {
-		return false
-	}
-
-	var gasLimitsCumulative uint64 = 0
-	for _, encodedTx := range bundleArgs.Txs {
-		tx := new(types.Transaction)
-		if err := tx.UnmarshalBinary(encodedTx); err != nil {
-			return false
+		newMessageDelay := time.Now().Sub(lastDispatch)
+		if newMessageDelay < p.DelayStep {
+			time.Sleep(newMessageDelay)
 		}
-		gasLimitsCumulative += tx.Gas()
-	}
-	if gasLimitsCumulative > p.GasLimitPerBundle {
-		return false
-	}
 
-	return true
+		lastDispatch = time.Now()
+
+		// Ditch response
+		_ = p.handleEthSendBundle(req)
+	}
 }
 
 func (p *Proxy) ListenAndServe(addr string) {
@@ -305,14 +292,14 @@ func (p *Proxy) ListenAndServe(addr string) {
 
 			sort.Strings(keys)
 
-			// fmt.Println(keys)
-
 			// storing pointer to slice here
 			atomic.StorePointer(&p.Whitelist, unsafe.Pointer(&keys))
 
 			<-ticker.C
 		}
 	}()
+
+	go p.proxyDispatch()
 
 	http.HandleFunc("/", p.handleRpc)
 
