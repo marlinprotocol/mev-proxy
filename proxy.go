@@ -7,13 +7,16 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unsafe"
 
+	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"golang.org/x/crypto/sha3"
 )
@@ -22,10 +25,22 @@ type Proxy struct {
 	RpcAddr string
 	// We will atomically update this to avoid explicit locks
 	// In modern systems, should avoid _any_ locks
-	Whitelist      unsafe.Pointer
-	SubgraphPath   string
-	BundleDispatch chan *RpcReq
-	DelayStep      time.Duration
+	Whitelist          unsafe.Pointer
+	SubgraphPath       string
+	BundleDispatchLock sync.Mutex
+	BundleDispatch     chan BundleDispatchItem
+	EpochTime          time.Duration
+	BundlesPerEpoch    uint
+	MaxBundleRetries   uint
+}
+
+type SendBundleArgs struct {
+	Txs               []hexutil.Bytes        `json:"txs"`
+	BlockNumber       string                 `json:"blockNumber"`
+	MinTimestamp      json.RawMessage        `json:"minTimestamp,omitempty"`
+	MaxTimestamp      json.RawMessage        `json:"maxTimestamp,omitempty"`
+	RevertingTxHashes json.RawMessage        `json:"revertingTxHashes,omitempty"`
+	ExtraInfo         map[string]interface{} `json:"extraInfo,omitempty"`
 }
 
 type RpcReq struct {
@@ -33,6 +48,32 @@ type RpcReq struct {
 	Method  string          `json:"method"`
 	Params  json.RawMessage `json:"params"`
 	Id      interface{}     `json:"id"`
+}
+
+type BundleDispatchItem struct {
+	data           *RpcReq
+	bundleGasPrice *big.Int
+	retry          uint
+}
+
+type BundleDispatchVec []BundleDispatchItem
+
+func (p BundleDispatchVec) Len() int {
+	return len(p)
+}
+
+func (p BundleDispatchVec) Less(i, j int) bool {
+	cmp := p[i].bundleGasPrice.Cmp(p[j].bundleGasPrice) // Is -1 for Less, 0 for Eq, 1 for Greater
+	if cmp == -1 {
+		return true
+	}
+	return false
+}
+
+func (p BundleDispatchVec) Swap(i, j int) {
+	tempBundle := p[i]
+	p[i] = p[j]
+	p[j] = tempBundle
 }
 
 type RpcErr struct {
@@ -218,19 +259,39 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 
 	var resp *RpcResp
 	if req.Method == "eth_sendBundle" {
+		p.BundleDispatchLock.Lock()
+		defer p.BundleDispatchLock.Unlock()
+
 		if len(p.BundleDispatch) == cap(p.BundleDispatch) {
 			// Silent drop
 			w.WriteHeader(400)
 			return
 		}
-		p.BundleDispatch <- req
 
-		// Eager return
-		resp = &RpcResp{
-			Jsonrpc: req.Jsonrpc,
-			Result:  "queued for proxy dispatch",
-			Error:   nil,
-			Id:      req.Id,
+		var extraInfo map[string]interface{}
+		err := json.Unmarshal(req.Params, &extraInfo)
+		if err != nil {
+			w.WriteHeader(400)
+			return
+		}
+		if bgp, ok := extraInfo["bundleGasPrice"]; ok {
+			bgpBigInt, ok := new(big.Int).SetString(bgp.(string), 10)
+			if !ok {
+				w.WriteHeader(400)
+				return
+			}
+
+			p.BundleDispatch <- BundleDispatchItem{req, bgpBigInt, 0}
+			// Eager return
+			resp = &RpcResp{
+				Jsonrpc: req.Jsonrpc,
+				Result:  "queued for proxy dispatch",
+				Error:   nil,
+				Id:      req.Id,
+			}
+		} else {
+			w.WriteHeader(400)
+			return
 		}
 	} else {
 		resp = &RpcResp{
@@ -258,23 +319,63 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
-// Ensures atleast p.BundleDispatch time separation
-// between two sendBundle requests
-func (p *Proxy) proxyDispatch() {
-	lastDispatch := time.Now()
+// Runs once every epoch.
+func (p *Proxy) epochLoop() {
 	for {
-		req := <-p.BundleDispatch
+		nextEpoch := time.Now().Add(p.EpochTime)
 
-		newMessageDelay := time.Now().Sub(lastDispatch)
-		if newMessageDelay < p.DelayStep {
-			time.Sleep(newMessageDelay)
+		p.BundleDispatchLock.Lock()
+
+		// Drain the dispatch channel
+		lenBundleDispatch := len(p.BundleDispatch)
+		bundles := make(BundleDispatchVec, lenBundleDispatch)
+		for i := 0; i < lenBundleDispatch; i++ {
+			bundles[i] = <-p.BundleDispatch
 		}
 
-		lastDispatch = time.Now()
+		// Sort bundles
+		sort.Sort(sort.Reverse(bundles))
 
-		// Ditch response
-		_ = p.handleEthSendBundle(req)
+		// Gather top bundles
+		selectedBundles := []*RpcReq{}
+		for i := uint(0); i < p.BundlesPerEpoch; i++ {
+			if len(bundles) == 0 {
+				break
+			}
+			selectedBundles = append(selectedBundles, bundles[0].data)
+			bundles = bundles[1:]
+		}
+
+		// Reinsert eligible bundles into channel
+		for _, b := range bundles {
+			if b.retry >= p.MaxBundleRetries {
+				// Ditch this bundle
+				continue
+			}
+			p.BundleDispatch <- BundleDispatchItem{b.data, b.bundleGasPrice, b.retry + 1}
+		}
+		// Eager unlock so we don't keep chan locked
+		// while we do RPC requests
+		p.BundleDispatchLock.Unlock()
+
+		p.sendBundlesToValidator(selectedBundles)
+
+		// Should be less than EpochTime as processing time has been deducted
+		time.Sleep(nextEpoch.Sub(time.Now()))
 	}
+}
+
+// Single shot parallel delivery
+func (p *Proxy) sendBundlesToValidator(bundles []*RpcReq) {
+	var wg sync.WaitGroup
+	for _, bundle := range bundles {
+		wg.Add(1)
+		go func(bundle *RpcReq) {
+			_ = p.handleEthSendBundle(bundle)
+			wg.Done()
+		}(bundle)
+	}
+	wg.Wait()
 }
 
 func (p *Proxy) ListenAndServe(addr string) {
@@ -292,14 +393,14 @@ func (p *Proxy) ListenAndServe(addr string) {
 
 			sort.Strings(keys)
 
+			// fmt.Println(keys)
+
 			// storing pointer to slice here
 			atomic.StorePointer(&p.Whitelist, unsafe.Pointer(&keys))
 
 			<-ticker.C
 		}
 	}()
-
-	go p.proxyDispatch()
 
 	http.HandleFunc("/", p.handleRpc)
 
