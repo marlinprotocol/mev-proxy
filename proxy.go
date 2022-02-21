@@ -16,6 +16,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/crypto/secp256k1"
 	"golang.org/x/crypto/sha3"
+	"golang.org/x/time/rate"
 )
 
 type Proxy struct {
@@ -24,6 +25,7 @@ type Proxy struct {
 	// In modern systems, should avoid _any_ locks
 	Whitelist    unsafe.Pointer
 	SubgraphPath string
+	limiter      *rate.Limiter
 }
 
 type RpcReq struct {
@@ -216,7 +218,20 @@ func (p *Proxy) handleRpc(w http.ResponseWriter, r *http.Request) {
 
 	var resp *RpcResp
 	if req.Method == "eth_sendBundle" {
-		resp = p.handleEthSendBundle(req)
+		if p.limiter.Allow() {
+			resp = p.handleEthSendBundle(req)
+		} else {
+			resp = &RpcResp{
+				"2.0",
+				nil,
+				&RpcErr{
+					-32601,
+					"Rate Limit Exceeded",
+					nil,
+				},
+				req.Id,
+			}
+		}
 	} else {
 		resp = &RpcResp{
 			"2.0",
